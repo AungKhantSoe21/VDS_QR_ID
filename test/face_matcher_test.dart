@@ -49,11 +49,51 @@ final _dummyCredential = MosipCredential(
 );
 
 void main() {
-  test('hash threshold defaults to field-calibrated 0.60', () {
-    // Backend lab default was 0.55; field data (genuine ~0.79, stranger
-    // >0.55) moved the shipped default up. Template scale is separate.
+  test('thresholds: hash 0.60, edge template 0.40, legacy 0.35', () {
+    // Template thresholds recalibrated Sep 2026 per embedding space:
+    // EdgeFace-S (genuine >= 0.73, impostors <= 0.13), w600k_mbf legacy
+    // (genuine >= 0.61, impostors <= 0.16).
     expect(FaceMatcher.hashThreshold, 0.60);
-    expect(FaceMatcher.templateThreshold, 0.30);
+    expect(FaceMatcher.templateThreshold, 0.40);
+    expect(FaceMatcher.legacyTemplateThreshold, 0.35);
+    expect(FaceMatcher.backend, contains('edgeface-s'));
+    expect(FaceMatcher.legacyBackend, contains('buffalo-mbf'));
+  });
+
+  test('pickMatch: current QR wins on edge margin', () {
+    final v = FaceMatcher.pickMatch(
+        edgeScore: 0.74, legacyScore: 0.08, isTemplate: true);
+    expect(v.match, isTrue);
+    expect(v.backend, FaceMatcher.backend);
+    expect(v.score, 0.74);
+    expect(v.threshold, 0.40);
+  });
+
+  test('pickMatch: legacy buffalo QR wins on legacy margin', () {
+    // Real field case: buffalo-issued 68B template scores garbage in
+    // EdgeFace space (-0.204) but matches in mbf space.
+    final v = FaceMatcher.pickMatch(
+        edgeScore: -0.204, legacyScore: 0.61, isTemplate: true);
+    expect(v.match, isTrue);
+    expect(v.backend, FaceMatcher.legacyBackend);
+    expect(v.score, 0.61);
+    expect(v.threshold, 0.35);
+  });
+
+  test('pickMatch: mismatch reports max-margin space', () {
+    final v = FaceMatcher.pickMatch(
+        edgeScore: 0.39, legacyScore: 0.20, isTemplate: true);
+    expect(v.match, isFalse);
+    expect(v.backend, FaceMatcher.backend);
+    expect(v.score, 0.39);
+  });
+
+  test('pickMatch: hash path uses 0.60 in both spaces', () {
+    final v = FaceMatcher.pickMatch(
+        edgeScore: 0.50, legacyScore: 0.65, isTemplate: false);
+    expect(v.match, isTrue);
+    expect(v.backend, FaceMatcher.legacyBackend);
+    expect(v.threshold, 0.60);
   });
 
   test('scoreHash: identical embedding scores 1.0', () {
@@ -110,6 +150,58 @@ void main() {
         () => FaceMatcher.scoreTemplate(
             _templateOf(List.filled(128, 0.1)), List.filled(64, 0.1)),
         throwsFormatException);
+  });
+
+  test('scoreTemplateV3: identical vector scores ~1.0', () {
+    final live = List<double>.generate(64, (i) => (i % 5) - 2.0);
+    final n = sqrt(live.fold<double>(0, (s, x) => s + x * x));
+    final t = Uint8List(68)
+      ..[0] = 0x03
+      ..[1] = 0x02
+      ..[2] = 0x40
+      ..[3] = 0x7f;
+    for (var i = 0; i < 64; i++) {
+      final q = ((live[i] / n).clamp(-1.0, 1.0) * 127).round();
+      t[4 + i] = q < 0 ? q + 256 : q;
+    }
+    expect(FaceMatcher.scoreTemplateV3(t, live), closeTo(1.0, 0.02));
+  });
+
+  test('scoreTemplateV3 rejects bad headers/dims', () {
+    expect(
+        () => FaceMatcher.scoreTemplateV3(
+            Uint8List(68), List.filled(64, 0.1)),
+        throwsFormatException);
+    expect(
+        () => FaceMatcher.scoreTemplateV3(
+            Uint8List.fromList(
+                [0x03, 0x02, 0x40, 0x7f, ...List.filled(64, 10)]),
+            List.filled(128, 0.1)),
+        throwsFormatException);
+  });
+
+  test('projection64 matches numpy reference (seed 6403)', () {
+    final emb = List<double>.generate(512, (i) => sin(i * 0.7));
+    final proj = FaceProjection.project64(emb);
+    expect(proj.length, 64);
+    const expected = [
+      0.015075339,
+      -0.141978875,
+      -0.068951681,
+      0.317392796,
+      0.006732265,
+      0.084280603,
+      0.025465693,
+      0.101304524,
+    ];
+    for (var i = 0; i < expected.length; i++) {
+      expect(proj[i], closeTo(expected[i], 1e-6));
+    }
+    var norm = 0.0;
+    for (final v in proj) {
+      norm += v * v;
+    }
+    expect(sqrt(norm), closeTo(1.0, 1e-9));
   });
 
   test('projection matches numpy reference (seed 39794)', () {

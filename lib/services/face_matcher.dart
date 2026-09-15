@@ -8,25 +8,38 @@ import 'mosip.dart';
 
 /// Face "same or not" check: live selfie vs the face reference in the QR.
 ///
-/// Fully on-device: SCRFD detection + ArcFace embedding (buffalo_l,
-/// same pipeline as the backend `scripts/facematch.py`) compared against
-/// the QR's irreversible hash/template.
+/// Fully on-device: SCRFD-500M detection + dual recognition embeddings
+/// (EdgeFace-S for current QRs, buffalo w600k_mbf for legacy QRs — same
+/// pipeline as the backend `scripts/facematch.py`, `FACE_MATCHER=edgeface`
+/// with `insightface-buffalo_s` history) compared against the QR's
+/// irreversible hash/template.
 ///
-/// Thresholds: [hashThreshold] defaults to **0.60** — tightened from the
-/// backend lab default (0.55) after field data showed strangers scoring
-/// above 0.55 while genuine matches score ~0.79. Template threshold
-/// stays 0.30 (different score scale). Both are tunable at runtime
-/// (scanner screen) and [hashThreshold] persists via shared_preferences;
-/// keep the backend aligned with `FACE_MATCH_THRESHOLD` in its `.env`
-/// for online parity.
+/// Old templates carry no model id (identical 68B/132B containers in both
+/// eras), so each selfie is embedded in **both** spaces and the better
+/// margin-above-threshold wins ([pickMatch]). A buffalo-issued QR verified
+/// with an EdgeFace-only build scores garbage (proven: same person 0.74
+/// same-space vs 0.08 cross-space) — dual embedding is what makes old QRs
+/// verify.
 ///
-/// The model pack (~191MB) downloads once on first use
+/// Thresholds: [hashThreshold] defaults to **0.60** (legacy 65B sign-hash
+/// path, both spaces). [templateThreshold] defaults to **0.40** —
+/// calibrated Sep 2026 for EdgeFace-S (genuine >= 0.73, impostors <= 0.13
+/// on both the 132B v2 and 68B v3-64 template paths).
+/// [legacyTemplateThreshold] defaults to **0.35** — calibrated Sep 2026
+/// for w600k_mbf (genuine >= 0.61, impostors <= 0.16). [hashThreshold] is
+/// tunable at runtime (scanner screen) and persists via
+/// shared_preferences; keep the backend aligned with
+/// `FACE_TEMPLATE_MATCH_THRESHOLD` in its `.env` for online parity.
+///
+/// The model pack (~31MB) downloads once on first use
 /// ([FaceModelPack]); [matchSelfieVsQr] throws [ModelPackMissing] until
 /// it is cached.
 class FaceMatcher {
   static double hashThreshold = 0.60;
-  static const templateThreshold = 0.30;
-  static const backend = 'insightface-buffalo_l (on-device)';
+  static const templateThreshold = 0.40;
+  static const legacyTemplateThreshold = 0.35;
+  static const backend = 'edgeface-s (on-device)';
+  static const legacyBackend = 'buffalo-mbf (on-device · legacy QR)';
 
   static OrtFaceEngine? _engine;
 
@@ -49,31 +62,82 @@ class FaceMatcher {
       );
     }
     final eng = engine ?? await _sharedEngine(pack);
-    final emb = await eng.embedJpeg(selfieBytes);
-    if (emb == null) {
+    final both = await eng.embedJpegBoth(selfieBytes);
+    if (both == null) {
       return const FaceMatchResult(
         FaceMatchStatus.noFace,
         detail: 'No face detected — face the camera in good light and retry.',
       );
     }
-    final isTemplate =
-        credential.faceHash.length == 132 && credential.faceHash[0] == 0x02;
-    final threshold = isTemplate ? templateThreshold : hashThreshold;
-    final score = isTemplate
-        ? scoreTemplate(credential.faceHash, FaceProjection.project(emb))
-        : scoreHash(credential.faceHash, emb);
-    if (score >= threshold) {
+    final verdict = pickMatch(
+      edgeScore: _scoreCredential(credential.faceHash, both.edge),
+      legacyScore: _scoreCredential(credential.faceHash, both.legacy),
+      isTemplate: _isTemplate(credential.faceHash),
+    );
+    if (verdict.match) {
       return FaceMatchResult(FaceMatchStatus.match,
-          score: score, threshold: threshold, backend: backend);
+          score: verdict.score,
+          threshold: verdict.threshold,
+          backend: verdict.backend);
     }
     return FaceMatchResult(FaceMatchStatus.mismatch,
-        score: score,
-        threshold: threshold,
-        backend: backend,
+        score: verdict.score,
+        threshold: verdict.threshold,
+        backend: verdict.backend,
         detail: 'Score below threshold — not the same person.');
   }
 
-  /// Shared process-wide engine (sessions weigh ~190MB; opened once).
+  /// True for versioned compact templates (132B v2 / 68B v3-64); anything
+  /// else takes the legacy 65B sign-hash path.
+  static bool _isTemplate(Uint8List faceHash) =>
+      (faceHash.length == 132 && faceHash[0] == 0x02) ||
+      (faceHash.length == 68 && faceHash[0] == 0x03);
+
+  /// Scores `faceHash` against a 512-d live embedding in one space,
+  /// routing by header (v3-64 → 64-d projection, v2 → 128-d projection,
+  /// else sign-hash). Throws [FormatException] on unknown formats.
+  static double _scoreCredential(Uint8List faceHash, List<double> emb) {
+    if (faceHash.length == 68 && faceHash[0] == 0x03) {
+      return scoreTemplateV3(faceHash, FaceProjection.project64(emb));
+    }
+    if (faceHash.length == 132 && faceHash[0] == 0x02) {
+      return scoreTemplate(faceHash, FaceProjection.project(emb));
+    }
+    return scoreHash(faceHash, emb);
+  }
+
+  /// Picks the winning embedding space by margin above its own threshold.
+  /// Pure and unit-tested. `isTemplate` selects template vs hash
+  /// thresholds per space. The reported score/threshold always belong to
+  /// the winning space, so the UI shows a coherent pair.
+  static ({double score, double threshold, String backend, bool match})
+      pickMatch({
+    required double edgeScore,
+    required double legacyScore,
+    required bool isTemplate,
+  }) {
+    final edgeThreshold = isTemplate ? templateThreshold : hashThreshold;
+    final legacyThreshold =
+        isTemplate ? legacyTemplateThreshold : hashThreshold;
+    final edgeMargin = edgeScore - edgeThreshold;
+    final legacyMargin = legacyScore - legacyThreshold;
+    if (edgeMargin >= legacyMargin) {
+      return (
+        score: edgeScore,
+        threshold: edgeThreshold,
+        backend: backend,
+        match: edgeMargin >= 0
+      );
+    }
+    return (
+      score: legacyScore,
+      threshold: legacyThreshold,
+      backend: legacyBackend,
+      match: legacyMargin >= 0
+    );
+  }
+
+  /// Shared process-wide engine (sessions weigh ~60MB; opened once).
   /// Throws [ModelPackMissing] when the pack needs downloading first —
   /// the UI catches this and offers the one-time download.
   static Future<OrtFaceEngine> _sharedEngine(FaceModelPack? pack) async {
@@ -144,6 +208,32 @@ class FaceMatcher {
     final n = sqrt(s);
     if (n == 0 || !n.isFinite) throw const FormatException('zero vector');
     return n;
+  }
+
+  /// Cosine similarity between a stored 68B v3-64 template
+  /// (`03 02 40 7f` + 64 int8 quantized, /127 — the backend default) and
+  /// a 64-d normalized live projection ([FaceProjection.project64]).
+  static double scoreTemplateV3(
+      Uint8List template, List<double> liveProjected) {
+    if (template.length != 68 ||
+        template[0] != 0x03 ||
+        template[1] != 0x02 ||
+        template[2] != 0x40 ||
+        template[3] != 0x7f) {
+      throw const FormatException('unsupported face template v3');
+    }
+    if (liveProjected.length != 64) {
+      throw const FormatException('projection must be 64-d');
+    }
+    final stored = List<double>.generate(
+        64, (i) => (template[4 + i] >= 128 ? template[4 + i] - 256 : template[4 + i]) / 127.0);
+    final storedNorm = _norm(stored);
+    final liveNorm = _norm(liveProjected);
+    var dot = 0.0;
+    for (var i = 0; i < 64; i++) {
+      dot += (stored[i] / storedNorm) * (liveProjected[i] / liveNorm);
+    }
+    return dot.clamp(-1.0, 1.0);
   }
 }
 

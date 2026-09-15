@@ -120,7 +120,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _notice = 'Model cache cleared (~191MB freed).';
+        _notice = 'Model cache cleared (~31MB freed).';
       });
       await _refreshModels();
     } catch (e) {
@@ -200,8 +200,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Expanded(
                         child: Text(
                           _modelsReady
-                              ? 'Ready (~191MB cached, SHA-verified)'
-                              : 'Not downloaded (~${(_modelsMissing / 1048576).ceil()} MB on first use)',
+                              ? 'Ready (~31MB bundled models, SHA-verified)'
+                              : 'Not set up (~${(_modelsMissing / 1048576).ceil()} MB one-time setup, offline)',
                           style: const TextStyle(
                               fontWeight: FontWeight.w600),
                         ),
@@ -226,7 +226,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ? null
                                 : _downloadModels,
                             icon: const Icon(Icons.download),
-                            label: const Text('Download'),
+                            label: const Text('Set up'),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -265,7 +265,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Text(
                 'eID Verify 0.9.0 (PoC)\n\n'
                 'Offline identity check: QR authenticity (EdDSA + expiry) → '
-                'on-device face match (ArcFace buffalo_l) → ID card. '
+                'on-device face match (EdgeFace-S) → ID card. '
                 'Fingerprint via external reader is optional.\n\n'
                 'Formats: MOSIP Claim 169 Base45 QR + legacy envelope v2/v3. '
                 'Conceptually aligned with ICAO VDS (offline signed '

@@ -378,8 +378,9 @@ class _DownloadCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'On-device matching needs the official buffalo_l weights '
-              '(~${(neededBytes / 1048576).ceil()} MB, SHA-verified). '
+              'On-device matching needs the bundled face models '
+              '(~${(neededBytes / 1048576).ceil()} MB one-time setup, '
+              'copied from the app — no download). '
               'Use Wi-Fi — after this, verification is fully offline.',
               style: const TextStyle(fontSize: 12, color: Colors.black87),
             ),

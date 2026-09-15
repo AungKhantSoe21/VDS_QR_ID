@@ -7,11 +7,16 @@ import 'package:onnxruntime/onnxruntime.dart';
 import 'face_model_pack.dart';
 
 /// On-device face embedding — Dart port of the backend pipeline
-/// (`scripts/facematch.py` → InsightFace buffalo_l):
+/// (`scripts/facematch.py`, `FACE_MATCHER=edgeface`):
 ///
-/// SCRFD det_10g (640 letterbox, thresh 0.5, NMS 0.4, largest face) →
-/// similarity-align to 112×112 (arcface template) → w600k_r50 →
+/// SCRFD-500M det_500m (640 letterbox, thresh 0.5, NMS 0.4, largest face) →
+/// similarity-align to 112×112 (arcface template) → EdgeFace-S →
 /// L2-normalized 512-d embedding.
+///
+/// Detector tensor layout is identical to the former det_10g (same
+/// strides/counts), so [ScrfdDecoder] is unchanged. Preprocessing
+/// (`(rgb-127.5)/128` detect, `(rgb-127.5)/127.5` recognition) matches
+/// EdgeFace's training convention exactly.
 ///
 /// Pure math ([ScrfdDecoder], [FaceAlign], [BlobPrep]) is dependency-free
 /// and unit-tested; [OrtFaceEngine] is the thin onnxruntime glue.
@@ -374,11 +379,23 @@ class BlobPrep {
 // ------------------------------------------------------------------ Engine
 
 /// Thin onnxruntime glue over the pure pipeline above.
+///
+/// Holds three sessions: one shared SCRFD-500M detector plus a recognizer
+/// per embedding space (EdgeFace-S for current QRs, w600k_mbf for legacy
+/// buffalo QRs). Old templates carry no model id, so the matcher embeds
+/// each selfie in both spaces and keeps the better match.
 class OrtFaceEngine {
-  OrtFaceEngine._(this._det, this._rec);
+  OrtFaceEngine._(this._det, this._rec, this._legacyRec);
 
   final OrtSession _det;
   final OrtSession _rec;
+  final OrtSession _legacyRec;
+
+  /// ONNX input names per model file (verified against the shipped weights;
+  /// SCRFD and w600k_mbf keep insightface's `input.1`, EdgeFace uses `input`).
+  static const detInputName = 'input.1';
+  static const recInputName = 'input';
+  static const legacyRecInputName = 'input.1';
 
   static bool _envReady = false;
 
@@ -394,15 +411,20 @@ class OrtFaceEngine {
         await pack.det.readAsBytes().then((b) => Uint8List.fromList(b));
     final recBytes =
         await pack.rec.readAsBytes().then((b) => Uint8List.fromList(b));
+    final legacyRecBytes = await pack.legacyRec
+        .readAsBytes()
+        .then((b) => Uint8List.fromList(b));
     final opts = OrtSessionOptions();
     final det = OrtSession.fromBuffer(detBytes, opts);
     final rec = OrtSession.fromBuffer(recBytes, opts);
-    return OrtFaceEngine._(det, rec);
+    final legacyRec = OrtSession.fromBuffer(legacyRecBytes, opts);
+    return OrtFaceEngine._(det, rec, legacyRec);
   }
 
   void release() {
     _det.release();
     _rec.release();
+    _legacyRec.release();
   }
 
   Future<FaceDetection?> largestFace(RgbImage src) async {
@@ -411,7 +433,7 @@ class OrtFaceEngine {
         input.blob, [1, 3, 640, 640]);
     final run = OrtRunOptions();
     try {
-      final outs = await _det.runAsync(run, {'input.1': tensor});
+      final outs = await _det.runAsync(run, {detInputName: tensor});
       if (outs == null || outs.length < 9) return null;
       List<List<double>> mat(OrtValue? v) =>
           (v?.value as List).map((r) => (r as List)
@@ -434,29 +456,47 @@ class OrtFaceEngine {
     }
   }
 
-  /// 512-d L2-normalized embedding of the largest face in `jpeg`.
+  /// 512-d L2-normalized EdgeFace-S embedding of the largest face in `jpeg`.
   /// Returns null when no face is detected.
   Future<List<double>?> embedJpeg(Uint8List jpeg) async {
+    final both = await embedJpegBoth(jpeg);
+    return both?.edge;
+  }
+
+  /// Both embedding spaces for `jpeg` (single detect + align, two
+  /// recognizer runs, ~30ms total on CPU). Returns null when no face is
+  /// detected. Powers dual-model matching for old (buffalo) QRs.
+  Future<({List<double> edge, List<double> legacy})?> embedJpegBoth(
+      Uint8List jpeg) async {
     final src = RgbImage.decode(jpeg);
     final face = await largestFace(src);
     if (face == null) return null;
     final abtt = FaceAlign.estimateNorm(face.kps);
     final aligned = FaceAlign.warp112(src, abtt);
     final blob = BlobPrep.recBlob(aligned);
-    final tensor = OrtValueTensor.createTensorWithDataList(
-        blob, [1, 3, 112, 112]);
-    final run = OrtRunOptions();
-    try {
-      final outs = await _rec.runAsync(run, {'input.1': tensor});
-      if (outs == null || outs.isEmpty) return null;
-      final rows = outs[0]?.value as List;
-      final flat = (rows.first as List)
-          .map((e) => (e as num).toDouble())
-          .toList();
-      return BlobPrep.l2norm(flat);
-    } finally {
-      tensor.release();
-      run.release();
+    Future<List<double>?> runOn(
+        OrtSession session, String inputName) async {
+      final tensor = OrtValueTensor.createTensorWithDataList(
+          blob, [1, 3, 112, 112]);
+      final run = OrtRunOptions();
+      try {
+        final outs = await session.runAsync(run, {inputName: tensor});
+        if (outs == null || outs.isEmpty) return null;
+        final rows = outs[0]?.value as List;
+        final flat = (rows.first as List)
+            .map((e) => (e as num).toDouble())
+            .toList();
+        return BlobPrep.l2norm(flat);
+      } finally {
+        tensor.release();
+        run.release();
+      }
     }
+
+    final edge = await runOn(_rec, recInputName);
+    if (edge == null) return null;
+    final legacy = await runOn(_legacyRec, legacyRecInputName);
+    if (legacy == null) return null;
+    return (edge: edge, legacy: legacy);
   }
 }

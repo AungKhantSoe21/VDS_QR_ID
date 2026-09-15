@@ -26,12 +26,9 @@ class QrIdentityApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'eID Verify',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xFF1B5E20)),
-        useMaterial3: true,
-      ),
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1B5E20)), useMaterial3: true),
       home: const ScannerScreen(),
+      debugShowCheckedModeBanner: false,
     );
   }
 }

@@ -30,8 +30,8 @@ curl -X POST http://localhost:3002/api/enroll \
 #    or display public/qrcodes/<id>.png for the camera)
 ```
 
-Face hashes come from `scripts/facematch.py --hash-of photo.jpg`
-(InsightFace buffalo_l; models under `data/models`).
+Face templates come from `scripts/facematch.py --template-of photo.jpg`
+(buffalo_s backend, the enrollment reference; models under `data/models`).
 
 ### 2. App
 
@@ -41,8 +41,11 @@ flutter pub get
 flutter run -d <device>             # camera + biometrics need a real phone
 ```
 
-First face check downloads the buffalo_l model pack once (~191MB,
-SHA-pinned HuggingFace weights, progress shown, Wi-Fi recommended),
+First face check copies the bundled face models into place once (~31MB:
+SCRFD-500M detector + EdgeFace-S recognizer for current QRs + w600k_mbf
+for legacy buffalo QRs, SHA-pinned, offline, takes seconds),
+then everything runs offline. Manage it in **Settings** (also: face
+threshold, cache clear, about).
 then everything runs offline. Manage it in **Settings** (also: face
 threshold, cache clear, about).
 
@@ -63,10 +66,14 @@ for online parity.
    (`lib/services/mosip.dart`, ported from backend `lib/mosip.js`,
    proven against backend-signed vectors in `test/mosip_test.dart`).
    Legacy: envelope CBOR → AES-GCM → payload (`lib/services/eid_*`).
-2. **Face** — SCRFD detect → ArcFace align/embed (w600k_r50 via
-   `onnxruntime`, models download-on-first-use) → `1-hamming` vs QR
-   hash ≥ threshold, or cosine vs compact template ≥ 0.30
-   (`lib/services/face_embedder.dart`, `face_matcher.dart`).
+2. **Face** — SCRFD-500M detect → ArcFace align → dual embed
+   (EdgeFace-S + legacy w600k_mbf via `onnxruntime`, models
+   download-on-first-use) → cosine vs compact template in both spaces,
+   better margin-above-threshold wins (current ≥ 0.40, legacy ≥ 0.35),
+   or `1-hamming` vs QR hash ≥ threshold
+   (`lib/services/face_embedder.dart`, `face_matcher.dart`). Old
+   buffalo QRs verify as-is: templates carry no model id, so both
+   spaces are tried.
 3. **Card** — NRC-styled flip card (`lib/widgets/smart_card.dart`).
    Data only: QRs carry a verification *pattern*, not a photo.
 4. **Fingerprint (optional)** — external OTG reader + ISO matcher SDK

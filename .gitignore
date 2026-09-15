@@ -15,6 +15,9 @@ migrate_working_dir/
 # Secrets — EID ENCRYPTION_KEY lives here, never commit.
 .env
 
+# Biometric reference blobs (face templates, FMRs) — never commit.
+*.bin
+
 # IntelliJ related
 *.iml
 *.ipr
