@@ -3,12 +3,13 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../services/external_finger_reader.dart';
+import '../ui/app_strings.dart';
+import '../ui/app_theme.dart';
+import '../widgets/score_gauge.dart';
+import '../widgets/section_header.dart';
+import '../widgets/verdict_chip.dart';
 
 /// OPTIONAL fingerprint step via an EXTERNAL reader (OTG scanner).
-///
-/// Reached from the smart card — never a gate. [fmrRef] is the QR's
-/// FMR reference (MOSIP QRs only — legacy QRs carry a fingerprint
-/// photo, not matchable minutiae, so the button stays hidden there).
 class ExternalReaderScreen extends StatefulWidget {
   const ExternalReaderScreen({
     super.key,
@@ -63,24 +64,22 @@ class _ExternalReaderScreenState extends State<ExternalReaderScreen> {
   Widget build(BuildContext context) {
     final m = _match;
     final ref = widget.fmrRef;
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Fingerprint (external, optional)')),
+      appBar: AppBar(
+        flexibleSpace: Container(decoration: const BoxDecoration(gradient: AppTheme.appBarGradient)),
+        title: Text('${S.fingerprint} (optional)')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(14),
+              padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('QR FINGERPRINT REFERENCE',
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 1.4,
-                          color: Colors.black54)),
-                  const SizedBox(height: 6),
+                  const SectionHeader('QR fingerprint reference'),
+                  const SizedBox(height: 8),
                   Text(
                     ref == null
                         ? 'This QR carries a fingerprint photo, not FMR '
@@ -88,57 +87,74 @@ class _ExternalReaderScreenState extends State<ExternalReaderScreen> {
                             'reference (MOSIP QRs).'
                         : 'ISO 19794-2 FMR — ${ref.length} bytes in QR. '
                             'Capture with the external reader for a 1:1 match.',
+                    style: const TextStyle(fontSize: 13),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
+                  const SizedBox(height: 8),
+                  Text(
                     'The phone sensor is not used: it cannot match a live '
                     'finger against the QR minutiae.',
-                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                    style: TextStyle(
+                        fontSize: 12, color: scheme.onSurfaceVariant),
                   ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           FilledButton.icon(
             onPressed:
                 (_busy || widget.fmrRef == null) ? null : _verify,
             icon: _busy
                 ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.fingerprint),
-            label: Text(_busy ? 'Waiting for reader…' : 'Capture + match'),
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2.5))
+                : const Icon(Icons.fingerprint_outlined),
+            label: Text(_busy
+                ? 'Waiting for reader…'
+                : 'Capture + match'),
           ),
           if (_error != null) ...[
-            const SizedBox(height: 8),
-            Text(_error!, style: const TextStyle(color: Colors.red)),
+            const SizedBox(height: 10),
+            Card(
+              color: scheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Text(_error!,
+                    style: TextStyle(
+                        fontSize: 13, color: scheme.onErrorContainer)),
+              ),
+            ),
           ],
           if (m != null) ...[
             const SizedBox(height: 12),
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(14),
-                child: Row(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(m.matched ? Icons.check_circle : Icons.cancel,
-                        color: m.matched ? Colors.green : Colors.red),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        m.matched
-                            ? 'FINGERPRINT MATCH — score ${m.score.toStringAsFixed(3)} vs ${m.threshold.toStringAsFixed(2)}'
-                            : 'FINGERPRINT MISMATCH — score ${m.score.toStringAsFixed(3)} vs ${m.threshold.toStringAsFixed(2)}',
-                        style:
-                            const TextStyle(fontWeight: FontWeight.w800),
-                      ),
+                    VerdictChip(
+                      icon: m.matched
+                          ? Icons.check_circle
+                          : Icons.cancel,
+                      label: m.matched
+                          ? 'FINGERPRINT MATCH'
+                          : 'FINGERPRINT MISMATCH',
+                      color: m.matched ? scheme.primary : scheme.error,
+                    ),
+                    const SizedBox(height: 14),
+                    ScoreGauge(
+                      score: m.score,
+                      threshold: m.threshold,
+                      scoreLabel: S.score,
+                      thresholdLabel: S.threshold,
                     ),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             FilledButton.tonalIcon(
               onPressed: () => Navigator.of(context).pop(m),
               icon: const Icon(Icons.check),

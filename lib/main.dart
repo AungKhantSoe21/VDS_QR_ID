@@ -1,33 +1,48 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
-import 'config/eid_key.dart';
-import 'config/env_parse.dart';
-import 'screens/scanner_screen.dart';
+import 'screens/splash_screen.dart';
+import 'ui/app_strings.dart';
+import 'ui/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Load the gitignored project .env (ENCRYPTION_KEY = CEK for encrypted
-  // QRs). Missing/unreadable is tolerated — the scanner shows the config
-  // error at scan time. Fully offline: no server, no dart-define.
-  try {
-    final raw = await rootBundle.loadString('.env');
-    EidKeyConfig.setEnvFileHex(parseEnv(raw)['ENCRYPTION_KEY']);
-  } catch (_) {
-    // No .env asset — key resolution reports the problem at scan time.
-  }
   runApp(const QrIdentityApp());
 }
 
-class QrIdentityApp extends StatelessWidget {
+class QrIdentityApp extends StatefulWidget {
   const QrIdentityApp({super.key});
+
+  @override
+  State<QrIdentityApp> createState() => _QrIdentityAppState();
+}
+
+class _QrIdentityAppState extends State<QrIdentityApp> {
+  @override
+  void initState() {
+    super.initState();
+    ThemeController.instance.addListener(_onChanged);
+    LanguageController.instance.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    ThemeController.instance.removeListener(_onChanged);
+    LanguageController.instance.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'eID Verify',
-      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1B5E20)), useMaterial3: true),
-      home: const ScannerScreen(),
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      themeMode: ThemeController.instance.value,
+      home: const SplashScreen(),
       debugShowCheckedModeBanner: false,
     );
   }

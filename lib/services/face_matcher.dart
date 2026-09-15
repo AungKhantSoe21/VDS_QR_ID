@@ -41,6 +41,10 @@ class FaceMatcher {
   static const backend = 'edgeface-s (on-device)';
   static const legacyBackend = 'buffalo-mbf (on-device · legacy QR)';
 
+  /// SharedPreferences key for the persisted face-match threshold.
+  /// Single source — SettingsScreen and AppStartup both use this.
+  static const thresholdPrefsKey = 'face_hash_threshold';
+
   static OrtFaceEngine? _engine;
 
   /// Scores a live selfie against the QR credential. Throws

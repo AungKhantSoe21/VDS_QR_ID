@@ -6,18 +6,16 @@ import 'package:image_picker/image_picker.dart';
 import '../models/card_data.dart';
 import '../services/face_matcher.dart';
 import '../services/face_model_pack.dart';
+import '../ui/app_strings.dart';
+import '../ui/app_theme.dart';
 import '../widgets/identity_image.dart';
+import '../widgets/scan_overlay.dart';
+import '../widgets/score_gauge.dart';
+import '../widgets/verdict_chip.dart';
 import '../widgets/verify_steps.dart';
 import 'smart_card_screen.dart';
 
 /// Step 2 — "same or not": live selfie vs the QR's face data.
-///
-/// - MOSIP QRs carry a face hash → real on-device auto-match
-///   (score vs threshold). A MATCH opens the ID card.
-/// - Legacy envelope QRs carry a PHOTO but no hash (and AVIF can't feed
-///   the model) → the screen shows QR photo + selfie side by side for
-///   an explicit human visual confirm. Labeled as such — never a
-///   fabricated score.
 class FaceVerifyScreen extends StatefulWidget {
   const FaceVerifyScreen({
     super.key,
@@ -39,7 +37,6 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
   String? _error;
   bool _busy = false;
 
-  // One-time model-pack download state (null = not downloading).
   int? _dlDone;
   int? _dlTotal;
   int? _dlNeeded;
@@ -61,7 +58,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
       if (!mounted) return;
       if (file == null) {
         setState(() => _busy = false);
-        return; // user cancelled — stay on screen
+        return;
       }
       final bytes = await file.readAsBytes();
       if (!mounted) return;
@@ -166,171 +163,161 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
   Widget build(BuildContext context) {
     final res = _result;
     final captured = _photo != null;
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Step 2 · Face check')),
+      appBar: AppBar(
+        flexibleSpace: Container(decoration: const BoxDecoration(gradient: AppTheme.appBarGradient)),
+        title: Text(S.faceTitle)),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(20),
         children: [
           const VerifyStepsHeader(current: 2),
-          const SizedBox(height: 12),
-          Card(
-            color: Colors.green.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Icon(Icons.verified,
-                      color: Colors.green.shade800, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'QR valid · verifying holder: ${widget.card.name.isEmpty ? '(unnamed)' : widget.card.name}',
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ],
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              VerdictChip(
+                icon: Icons.verified,
+                label: 'QR မှန်ကန်သည်',
+                color: scheme.primary,
+                compact: true,
               ),
-            ),
+              VerdictChip(
+                icon: Icons.person,
+                label: widget.card.name.isEmpty ? '(unnamed)' : widget.card.name,
+                color: scheme.tertiary,
+                compact: true,
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           if (_autoMode) ...[
-            if (_photo != null)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.memory(_photo!,
-                    height: 260, fit: BoxFit.cover),
-              )
-            else
-              Container(
-                height: 200,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Center(
-                  child: Icon(Icons.face, size: 64, color: Colors.black38),
-                ),
-              ),
+            _SelfieHero(
+              photo: _photo,
+              busy: _busy,
+              onTap: _busy ? null : _capture,
+            ),
           ] else ...[
-            // Visual mode: QR photo vs live selfie, side by side.
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: Column(
-                    children: [
-                      const Text('QR photo',
-                          style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.black54)),
-                      const SizedBox(height: 4),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: widget.card.portrait == null
-                            ? Container(
-                                height: 160,
-                                color: Colors.grey.shade200,
-                                alignment: Alignment.center,
-                                child: const Text('No photo in QR',
-                                    style: TextStyle(fontSize: 11)),
-                              )
-                            : IdentityImage(
-                                bytes: widget.card.portrait!,
-                                mime: widget.card.portraitMime,
-                                label: 'QR photo',
-                              ),
-                      ),
-                    ],
+                  child: _CompareTile(
+                    label: S.qrPhoto,
+                    child: widget.card.portrait == null
+                        ? _PlaceholderBox(
+                            height: 170,
+                            label: 'No photo in QR',
+                          )
+                        : IdentityImage(
+                            bytes: widget.card.portrait!,
+                            mime: widget.card.portraitMime,
+                            label: 'QR photo',
+                          ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 10),
                 Expanded(
-                  child: Column(
-                    children: [
-                      const Text('Live selfie',
-                          style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.black54)),
-                      const SizedBox(height: 4),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: _photo == null
-                            ? Container(
-                                height: 160,
-                                color: Colors.grey.shade200,
-                                alignment: Alignment.center,
-                                child: const Icon(Icons.face,
-                                    size: 40, color: Colors.black38),
-                              )
-                            : Image.memory(_photo!,
-                                height: 160, fit: BoxFit.cover),
-                      ),
-                    ],
+                  child: _CompareTile(
+                    label: S.liveSelfie,
+                    child: _photo == null
+                        ? const _PlaceholderBox(
+                            height: 170,
+                            icon: Icons.face_outlined,
+                            label: 'No selfie yet',
+                          )
+                        : Image.memory(_photo!,
+                            height: 170, fit: BoxFit.cover),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'This QR carries a photo but no face hash, so matching is '
-              'a human visual check — compare both pictures, then confirm.',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
+            const SizedBox(height: 10),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Row(
+                  children: [
+                    Icon(Icons.visibility_outlined,
+                        color: scheme.tertiary, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        S.visualHint,
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: _busy ? null : _capture,
             icon: _busy
                 ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.camera_front),
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2.5))
+                : const Icon(Icons.camera_front_outlined),
             label: Text(_busy
-                ? 'Working…'
+                ? S.working
                 : _photo == null
-                    ? 'Capture live selfie'
-                    : 'Retake selfie'),
+                    ? S.captureSelfie
+                    : S.retakeSelfie),
           ),
           if (_error != null && _dlNeeded == null) ...[
-            const SizedBox(height: 8),
-            Text(_error!, style: const TextStyle(color: Colors.red)),
+            const SizedBox(height: 10),
+            _ErrorCard(message: _error!),
           ],
-          if (_dlNeeded != null) _DownloadCard(
-            neededBytes: _dlNeeded!,
-            done: _dlDone,
-            total: _dlTotal,
-            busy: _busy,
-            onDownload: _downloadModels,
-          ),
-          if (res != null) _ResultCard(result: res),
-          const SizedBox(height: 16),
+          if (_dlNeeded != null) ...[
+            const SizedBox(height: 10),
+            _SetupCard(
+              neededBytes: _dlNeeded!,
+              done: _dlDone,
+              total: _dlTotal,
+              busy: _busy,
+              onSetup: _downloadModels,
+            ),
+          ],
+          if (res != null) ...[
+            const SizedBox(height: 10),
+            _ResultCard(result: res),
+          ],
+          const SizedBox(height: 20),
           if (_autoMode) ...[
             if (res?.isMatch == true && captured)
               FilledButton.icon(
                 onPressed: () =>
                     _openCard(match: res, visual: false),
-                icon: const Icon(Icons.badge),
-                label: const Text('Face match — show ID card'),
+                icon: const Icon(Icons.badge_outlined),
+                label: Text(S.showCard),
               )
             else
-              const Text(
-                'A face MATCH opens the ID card.',
-                style: TextStyle(color: Colors.black54),
+              Center(
+                child: Text(
+                  'တူညီမှ ကတ်ပွင့်မည် · A face MATCH opens the ID card.',
+                  style: TextStyle(
+                      color: scheme.onSurfaceVariant, fontSize: 12),
+                ),
               ),
           ] else ...[
             if (captured)
               FilledButton.icon(
                 onPressed: () => _openCard(visual: true),
-                icon: const Icon(Icons.visibility),
-                label: const Text('Visually confirmed — show ID card'),
+                icon: const Icon(Icons.visibility_outlined),
+                label: Text(S.visualConfirm),
               )
             else
-              const Text(
-                'Capture a selfie to compare against the QR photo.',
-                style: TextStyle(color: Colors.black54),
+              Center(
+                child: Text(
+                  'Capture a selfie to compare.',
+                  style: TextStyle(
+                      color: scheme.onSurfaceVariant, fontSize: 12),
+                ),
               ),
           ],
         ],
@@ -339,55 +326,215 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
   }
 }
 
-class _DownloadCard extends StatelessWidget {
-  const _DownloadCard({
+class _SelfieHero extends StatelessWidget {
+  const _SelfieHero({
+    required this.photo,
+    required this.busy,
+    required this.onTap,
+  });
+
+  final Uint8List? photo;
+  final bool busy;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 280,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: scheme.outlineVariant),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (photo != null)
+              Image.memory(photo!, fit: BoxFit.cover)
+            else
+              Container(
+                color: scheme.surfaceContainerHighest,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.face_outlined,
+                        size: 72, color: scheme.onSurfaceVariant),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Center your face',
+                      style: TextStyle(
+                          fontSize: 13, color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            const IgnorePointer(child: FaceFrameOverlay()),
+            if (busy)
+              Container(
+                color: scheme.scrim.withValues(alpha: 0.35),
+                child: const Center(
+                  child: CircularProgressIndicator(),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CompareTile extends StatelessWidget {
+  const _CompareTile({
+    required this.label,
+    required this.child,
+  });
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: scheme.onSurface),
+        ),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: child,
+        ),
+      ],
+    );
+  }
+}
+
+class _PlaceholderBox extends StatelessWidget {
+  const _PlaceholderBox({
+    required this.height,
+    this.icon = Icons.image_outlined,
+    required this.label,
+  });
+
+  final double height;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      height: height,
+      color: scheme.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 40, color: scheme.onSurfaceVariant),
+          const SizedBox(height: 6),
+          Text(label,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ErrorCard extends StatelessWidget {
+  const _ErrorCard({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      color: scheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, color: scheme.onErrorContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(message,
+                  style: TextStyle(
+                      fontSize: 13, color: scheme.onErrorContainer)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SetupCard extends StatelessWidget {
+  const _SetupCard({
     required this.neededBytes,
     required this.done,
     required this.total,
     required this.busy,
-    required this.onDownload,
+    required this.onSetup,
   });
 
   final int neededBytes;
   final int? done;
   final int? total;
   final bool busy;
-  final VoidCallback onDownload;
+  final VoidCallback onSetup;
 
   @override
   Widget build(BuildContext context) {
-    final downloading = done != null && total != null;
-    final progress =
-        downloading && total! > 0 ? (done! / total!).clamp(0.0, 1.0) : 0.0;
+    final scheme = Theme.of(context).colorScheme;
+    final settingUp = done != null && total != null;
+    final progress = settingUp && total! > 0
+        ? (done! / total!).clamp(0.0, 1.0)
+        : 0.0;
     return Card(
-      color: Colors.blue.shade50,
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Row(
+            Row(
               children: [
-                Icon(Icons.download, color: Colors.blue),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text('One-time face-model download',
-                      style: TextStyle(fontWeight: FontWeight.w800)),
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: scheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(Icons.memory_outlined,
+                      color: scheme.onPrimaryContainer),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Face models needed',
+                    style: TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w800),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              'On-device matching needs the bundled face models '
-              '(~${(neededBytes / 1048576).ceil()} MB one-time setup, '
-              'copied from the app — no download). '
-              'Use Wi-Fi — after this, verification is fully offline.',
-              style: const TextStyle(fontSize: 12, color: Colors.black87),
-            ),
             const SizedBox(height: 8),
-            if (downloading) ...[
+            Text(
+              'On-device match (~${(neededBytes / 1048576).ceil()} MB, one-time copy from APK).',
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            if (settingUp) ...[
               LinearProgressIndicator(value: progress),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
               Text(
                 '${(done! / 1048576).toStringAsFixed(1)} / '
                 '${(total! / 1048576).toStringAsFixed(1)} MB',
@@ -395,9 +542,9 @@ class _DownloadCard extends StatelessWidget {
               ),
             ] else
               FilledButton.icon(
-                onPressed: busy ? null : onDownload,
-                icon: const Icon(Icons.download),
-                label: const Text('Download + verify face'),
+                onPressed: busy ? null : onSetup,
+                icon: const Icon(Icons.download_outlined),
+                label: Text(S.setUp),
               ),
           ],
         ),
@@ -412,52 +559,54 @@ class _ResultCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final (icon, color, title) = switch (result.status) {
       FaceMatchStatus.match => (
           Icons.check_circle,
-          Colors.green,
-          'SAME PERSON — face match'
+          scheme.primary,
+          S.matchTitle,
         ),
       FaceMatchStatus.mismatch => (
           Icons.cancel,
-          Colors.red,
-          'NOT THE SAME — face mismatch'
+          scheme.error,
+          S.mismatchTitle,
         ),
       FaceMatchStatus.noFace => (
-          Icons.face_retouching_off,
-          Colors.orange,
-          'NO FACE — retake the selfie'
+          Icons.face_retouching_off_outlined,
+          scheme.tertiary,
+          S.noFaceTitle,
         ),
     };
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(icon, color: color),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(title,
-                      style: const TextStyle(fontWeight: FontWeight.w800)),
-                ),
-              ],
+            VerdictChip(
+              icon: icon,
+              label: title,
+              color: color,
             ),
             if (result.score != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Score ${result.score!.toStringAsFixed(3)} vs threshold '
-                '${result.threshold?.toStringAsFixed(2) ?? '—'}'
-                '${result.backend != null ? ' · ${result.backend}' : ''}',
+              const SizedBox(height: 14),
+              ScoreGauge(
+                score: result.score!,
+                threshold: result.threshold ?? 0.0,
+                scoreLabel: S.score,
+                thresholdLabel: S.threshold,
               ),
             ],
-            if (result.detail != null) ...[
-              const SizedBox(height: 4),
-              Text(result.detail!,
-                  style: const TextStyle(
-                      fontSize: 12, color: Colors.black54)),
+            if (result.backend != null || result.detail != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                [
+                  if (result.backend != null) result.backend!,
+                  if (result.detail != null) result.detail!,
+                ].join(' · '),
+                style: TextStyle(
+                    fontSize: 12, color: scheme.onSurfaceVariant),
+              ),
             ],
           ],
         ),

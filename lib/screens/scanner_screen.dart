@@ -1,27 +1,20 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/card_data.dart';
 import '../models/eid_record.dart';
-import '../services/eid_codec.dart';
-import '../services/eid_crypto.dart';
 import '../services/eid_parser.dart';
-import '../services/face_matcher.dart';
 import '../services/mosip.dart';
+import '../ui/app_strings.dart';
+import '../ui/app_theme.dart';
 import '../widgets/progress_dialog.dart';
+import '../widgets/scan_overlay.dart';
 import 'face_verify_screen.dart';
-import 'qr_inspector_screen.dart';
-import 'settings_screen.dart';
 
-/// Fully-offline flow (no server):
-///
-/// 1. Scan QR → MOSIP Base45 text (uppercased) → [verifyQrTextOffline]
-///    (EdDSA signature + expiry, pinned issuer), or legacy envelope
-///    bytes → offline AES-GCM decode → [FaceVerifyScreen]
-///    (holder name shown, live selfie, same-or-not).
-/// 2. Face match (or visual confirm) → [SmartCardScreen] with holder info.
+enum StatusTone { idle, working, ok, fail }
+
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
 
@@ -30,19 +23,16 @@ class ScannerScreen extends StatefulWidget {
 }
 
 class _ScannerScreenState extends State<ScannerScreen> {
-  final MobileScannerController _controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.normal,
-    facing: CameraFacing.back,
-    torchEnabled: false,
-  );
+  final MobileScannerController _controller = MobileScannerController(detectionSpeed: DetectionSpeed.normal, facing: CameraFacing.back, torchEnabled: false);
   EidParser? _parser;
   String? _parserError;
   bool _busy = false;
   DateTime? _lastAttempt;
 
   int _detections = 0;
-  String _status = 'Waiting for QR…';
-  String _detail = 'Point the camera at the code. No network needed.';
+  String _status = 'QR ကို စောင့်နေသည်…';
+  String _detail = 'ကင်မရာကို QR ကုဒ်ဘက်သို့ ချိန်ပါ';
+  StatusTone _tone = StatusTone.idle;
 
   @override
   void initState() {
@@ -52,20 +42,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
     } on FormatException catch (e) {
       _parser = null;
       _parserError = e.message;
-    }
-    _loadThreshold();
-  }
-
-  /// Applies the persisted face-match threshold (set in Settings).
-  Future<void> _loadThreshold() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getDouble(SettingsScreen.thresholdKey);
-      if (saved != null && saved > 0 && saved < 1) {
-        FaceMatcher.hashThreshold = saved;
-      }
-    } catch (_) {
-      // Storage unavailable — keep the default.
     }
   }
 
@@ -84,37 +60,31 @@ class _ScannerScreenState extends State<ScannerScreen> {
   }
 
   static final _b64Pattern = RegExp(r'^[A-Za-z0-9\-_+/=]+$');
-
-  /// MOSIP alphanumeric QR (agent.md §4): `0-9A-Z $%*+-./:`, up to 4296
-  /// chars. Always uppercased before decode.
   static final _b45Pattern = RegExp(r'^[0-9A-Z $%*+\-./:]+$');
   static bool isMosipQrText(String s) {
     final t = s.trim().toUpperCase();
     return t.length >= 100 && t.length <= 4296 && _b45Pattern.hasMatch(t);
   }
 
-  static bool _looksLikeQrText(String s) =>
-      s.length >= 64 && _b64Pattern.hasMatch(s);
+  static bool _looksLikeQrText(String s) => s.length >= 64 && _b64Pattern.hasMatch(s);
 
-  void _setStatus(String status, String detail) {
+  void _setStatus(String status, String detail, [StatusTone tone = StatusTone.idle]) {
     if (!mounted) return;
     setState(() {
       _status = status;
       _detail = detail;
+      _tone = tone;
     });
   }
 
-  /// Backend `reason` → short human line. Matches agent.md §5 exactly.
   static String reasonHint(String reason) => switch (reason) {
-        'expired' => 'QR expired — re-enroll this person.',
-        'not-yet-valid' => 'QR not yet valid — check device clock.',
-        'unknown-key' =>
-          'Signed by an unknown issuer — issuer key rotated? Re-pin.',
-        'auth-failed' =>
-          'Signature/decrypt failed — tampered QR or wrong key (.env ENCRYPTION_KEY must match the issuer server).',
-        'unsupported-legacy-qr' => 'Legacy QR format — re-enroll.',
-        _ => 'Not a valid eID QR ($reason).',
-      };
+    'expired' => 'QR expired — re-enroll this person.',
+    'not-yet-valid' => 'QR not yet valid — check device clock.',
+    'unknown-key' => 'Signed by an unknown issuer — issuer key rotated? Re-pin.',
+    'auth-failed' => 'Signature/decrypt failed — tampered QR or wrong key (.env ENCRYPTION_KEY must match the issuer server).',
+    'unsupported-legacy-qr' => 'Legacy QR format — re-enroll.',
+    _ => 'Not a valid eID QR ($reason).',
+  };
 
   Future<void> _attemptCapture(BarcodeCapture capture) async {
     if (capture.barcodes.isEmpty || !mounted) return;
@@ -126,68 +96,43 @@ class _ScannerScreenState extends State<ScannerScreen> {
     final bytesLen = bytes?.length ?? 0;
 
     final now = DateTime.now();
-    if (_busy ||
-        (_lastAttempt != null &&
-            now.difference(_lastAttempt!) < const Duration(seconds: 2))) {
-      _setStatus('Seen #$_detections (cooling down)…',
-          'bytes=$bytesLen text=${text.length} format=${b.format.name}');
+    if (_busy || (_lastAttempt != null && now.difference(_lastAttempt!) < const Duration(seconds: 2))) {
+      _setStatus('Seen #$_detections (cooling down)…', 'bytes=$bytesLen text=${text.length} format=${b.format.name}');
       return;
     }
     _busy = true;
     _lastAttempt = now;
 
     try {
-      _setStatus('Verifying #$_detections (offline)…',
-          'bytes=$bytesLen text=${text.length} format=${b.format.name}');
+      _setStatus('Verifying #$_detections (offline)…', 'bytes=$bytesLen text=${text.length} format=${b.format.name}', StatusTone.working);
 
-      // Path 1 (current): MOSIP QR → offline verify → face check.
       if (isMosipQrText(text)) {
         final qrText = text.toUpperCase();
         try {
-          final credential = await showDecryptingDialog(
-              context, verifyQrTextOffline(qrText),
-              label: 'Verifying…');
+          final credential = await showDecryptingDialog(context, verifyQrTextOffline(qrText), label: 'Verifying…');
           if (!mounted) return;
-          _setStatus('QR valid ✓ ${credential.name}'.trim(),
-              'offline ${credential.qrMode} · text=${text.length}');
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-                builder: (_) => FaceVerifyScreen(
-                    card: CardData.fromMosip(credential, qrText))),
-          );
+          _setStatus('QR valid ✓ ${credential.name}'.trim(), 'offline ${credential.qrMode} · text=${text.length}', StatusTone.ok);
+          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => FaceVerifyScreen(card: CardData.fromMosip(credential, qrText))));
         } on FormatException catch (e) {
-          _setStatus('QR invalid ✗ (${e.message})',
-              '${reasonHint(e.message)} text=${text.length}');
+          _setStatus('QR invalid ✗ (${e.message})', '${reasonHint(e.message)} text=${text.length}', StatusTone.fail);
         }
         return;
       }
 
-      // Path 2/3 (legacy envelope): photo + demographics decode offline
-      // (image_encryption_backend.md) → same face-check flow, with the
-      // QR's real photo bytes on the card.
-      final record = await showDecryptingDialog(
-          context, _decodeLegacyPaths(bytes, text));
+      final record = await showDecryptingDialog(context, _decodeLegacyPaths(bytes, text));
       if (!mounted || record == null) return;
-      final legacyQrText = (bytes != null && bytes.isNotEmpty)
-          ? EidParser.envelopeToQrText(bytes)
-          : text;
-      _setStatus('Valid ✓ id=${record.id}',
-          'bytes=$bytesLen text=${text.length}');
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-            builder: (_) => FaceVerifyScreen(
-                card: CardData.fromLegacy(record, legacyQrText))),
-      );
+      final legacyQrText = (bytes != null && bytes.isNotEmpty) ? EidParser.envelopeToQrText(bytes) : text;
+      _setStatus('Valid ✓ id=${record.id}', 'bytes=$bytesLen text=${text.length}', StatusTone.ok);
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => FaceVerifyScreen(card: CardData.fromLegacy(record, legacyQrText))));
     } finally {
       _busy = false;
     }
   }
 
-  Future<EidRecord?> _decodeLegacyPaths(
-      Uint8List? bytes, String text) async {
+  Future<EidRecord?> _decodeLegacyPaths(Uint8List? bytes, String text) async {
     final parser = _parser;
     if (parser == null) {
-      _setStatus('No key', _parserError ?? 'ENCRYPTION_KEY missing.');
+      _setStatus('No key', _parserError ?? 'ENCRYPTION_KEY missing.', StatusTone.fail);
       return null;
     }
     String? bytesError;
@@ -202,23 +147,19 @@ class _ScannerScreenState extends State<ScannerScreen> {
       try {
         return await parser.parseQrTextB64Url(text);
       } on FormatException catch (e) {
-        _setStatus('Unreadable QR ✗ (${e.message})',
-            _hintFor(e.message, bytes?.length ?? 0, text.length, bytesError));
+        _setStatus('Unreadable QR ✗ (${e.message})', _hintFor(e.message, bytes?.length ?? 0, text.length, bytesError), StatusTone.fail);
         return null;
       }
     }
     if ((bytes == null || bytes.isEmpty) && text.isEmpty) {
-      _setStatus('Empty detection', 'Barcode had neither bytes nor text.');
+      _setStatus('Empty detection', 'Barcode had neither bytes nor text.', StatusTone.fail);
     } else {
-      _setStatus('Unreadable QR ✗ (${bytesError ?? 'malformed-envelope'})',
-          _hintFor(bytesError ?? 'malformed-envelope', bytes?.length ?? 0,
-              text.length, null));
+      _setStatus('Unreadable QR ✗ (${bytesError ?? 'malformed-envelope'})', _hintFor(bytesError ?? 'malformed-envelope', bytes?.length ?? 0, text.length, null), StatusTone.fail);
     }
     return null;
   }
 
-  static String _hintFor(
-      String reason, int bytesLen, int textLen, String? bytesError) {
+  static String _hintFor(String reason, int bytesLen, int textLen, String? bytesError) {
     var extra = 'bytes=$bytesLen text=$textLen.';
     if (bytesLen == 0 && textLen > 0 && textLen < 100) {
       extra += ' Hold steady 15–30 cm, improve focus/light.';
@@ -230,157 +171,25 @@ class _ScannerScreenState extends State<ScannerScreen> {
     return 'Not a valid eID QR. $extra';
   }
 
-  /// Offline self-test for the legacy key path (no camera).
-  Future<void> _selfTest() async {
-    final parser = _parser;
-    if (parser == null) {
-      _setStatus('Self-test ✗', _parserError ?? 'ENCRYPTION_KEY missing.');
-      return;
-    }
-    try {
-      final crypto = EidCrypto();
-      const img = <int>[1, 2, 3, 4];
-      final payload = EidCodec.encodePayloadV3(
-        id: 'self-test',
-        ts: 't',
-        name: 'Self Test',
-        idNumber: 'TEST',
-        fmt: 'jpeg',
-        passport: Uint8List.fromList(img),
-        fingerprint: Uint8List.fromList(img),
-      );
-      final enc = await crypto.encrypt(payload);
-      final envelope = EidCodec.encodeEnvelope(
-          version: 3, iv: enc.iv, tag: enc.tag, ct: enc.ct);
-      final rec = await parser.parseEnvelopeBytes(envelope);
-      if (!mounted) return;
-      _setStatus('Self-test ✓ (id=${rec.id})',
-          'Legacy key + AES-GCM + CBOR work. MOSIP QRs verify via pinned EdDSA key.');
-    } on FormatException catch (e) {
-      _setStatus('Self-test ✗ (${e.message})',
-          'Key/crypto broken — check .env ENCRYPTION_KEY (64 hex chars).');
-    } catch (e) {
-      if (mounted) _setStatus('Self-test ✗', 'Unexpected error: $e');
-    }
-  }
-
-  /// Debug path: paste MOSIP Base45 `qrText` (or legacy base64url).
-  /// MOSIP text → offline verify → staged flow.
-  Future<void> _pasteQrText() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!mounted) return;
-    final text = data?.text?.trim() ?? '';
-    if (text.isEmpty) {
-      _setStatus('Clipboard empty', 'Copy qrText first.');
-      return;
-    }
-    if (_busy) return;
-    _busy = true;
-    try {
-      if (isMosipQrText(text)) {
-        _setStatus('Verifying pasted QR (offline)…', 'text=${text.length}');
-        try {
-          final credential = await showDecryptingDialog(
-            context,
-            verifyQrTextOffline(text),
-            label: 'Verifying…',
-          );
-          if (!mounted) return;
-          _setStatus('QR valid ✓ ${credential.name}'.trim(),
-              'offline ${credential.qrMode}');
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-                builder: (_) => FaceVerifyScreen(
-                    card: CardData.fromMosip(
-                        credential, text.toUpperCase()))),
-          );
-        } on FormatException catch (e) {
-          _setStatus('Pasted QR invalid ✗ (${e.message})',
-              reasonHint(e.message));
-        }
-        return;
-      }
-      final parser = _parser;
-      if (parser == null) {
-        _setStatus('No key', _parserError ?? 'ENCRYPTION_KEY missing.');
-        return;
-      }
-      _setStatus('Decoding pasted text…', 'text=${text.length}');
-      final record = await showDecryptingDialog(
-          context, parser.parseQrTextB64Url(text));
-      if (!mounted) return;
-      _setStatus('Valid ✓ id=${record.id}', 'from pasted text');
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-            builder: (_) => FaceVerifyScreen(
-                card: CardData.fromLegacy(record, text))),
-      );
-    } on FormatException catch (e) {
-      _setStatus('Pasted text unreadable ✗ (${e.message})',
-          _hintFor(e.message, 0, text.length, null));
-    } catch (e) {
-      if (mounted) _setStatus('Error', 'Unexpected error: $e');
-    } finally {
-      _busy = false;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('eID Verify'),
+        flexibleSpace: Container(decoration: const BoxDecoration(gradient: AppTheme.appBarGradient)),
+        title: Text(S.scannerTitle),
         actions: [
-          IconButton(
-            tooltip: 'Toggle torch',
-            icon: const Icon(Icons.flash_on),
-            onPressed: () => _controller.toggleTorch(),
-          ),
-          IconButton(
-            tooltip: 'Switch camera',
-            icon: const Icon(Icons.cameraswitch),
-            onPressed: () => _controller.switchCamera(),
-          ),
-          IconButton(
-            tooltip: 'Offline self-test (legacy key + crypto, no camera)',
-            icon: const Icon(Icons.science),
-            onPressed: _selfTest,
-          ),
-          IconButton(
-            tooltip: 'Paste qrText (debug)',
-            icon: const Icon(Icons.paste),
-            onPressed: _pasteQrText,
-          ),
-          IconButton(
-            tooltip: 'Settings (threshold, models, about)',
-            icon: const Icon(Icons.settings),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                  builder: (_) => const SettingsScreen()),
-            ),
-          ),
-          IconButton(
-            tooltip: 'QR inspector: dump identity keys/sizes (debug)',
-            icon: const Icon(Icons.manage_search),
-            onPressed: () async {
-              final nav = Navigator.of(context);
-              final data =
-                  await Clipboard.getData(Clipboard.kTextPlain);
-              await nav.push(
-                MaterialPageRoute(
-                  builder: (_) => QrInspectorScreen(
-                      initialText: data?.text?.trim() ?? ''),
-                ),
-              );
-            },
-          ),
+          IconButton(tooltip: S.torch, icon: const Icon(Icons.flash_on_outlined), onPressed: () => _controller.toggleTorch()),
+          IconButton(tooltip: S.switchCamera, icon: const Icon(Icons.cameraswitch_outlined), onPressed: () => _controller.switchCamera()),
+          const SizedBox(width: 15),
         ],
       ),
       body: Column(
         children: [
           Expanded(
-            flex: 3,
+            flex: 5,
             child: Stack(
+              fit: StackFit.expand,
               children: [
                 MobileScanner(
                   controller: _controller,
@@ -388,68 +197,101 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   errorBuilder: (context, error) => Center(
                     child: Padding(
                       padding: const EdgeInsets.all(24),
-                      child: Text(
-                        'Camera error: ${error.errorCode}\n'
-                        'Grant camera permission and restart.',
-                        textAlign: TextAlign.center,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.no_photography_outlined, size: 48, color: scheme.onSurfaceVariant),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Camera error: ${error.errorCode}\n'
+                            'Grant camera permission and restart.',
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
                       ),
                     ),
                   ),
                 ),
-                IgnorePointer(
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black.withValues(alpha: 0.35), Colors.transparent, Colors.transparent, Colors.black.withValues(alpha: 0.45)], stops: const [0.0, 0.25, 0.7, 1.0]),
+                  ),
+                ),
+                const IgnorePointer(child: ScanOverlay()),
+                Positioned(
+                  top: 12,
+                  left: 0,
+                  right: 0,
                   child: Center(
                     child: Container(
-                      width: 240,
-                      height: 240,
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.9),
-                            width: 3),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.55), borderRadius: BorderRadius.circular(20)),
+                      child: Text(S.scannerHint, style: const TextStyle(color: Colors.white, fontSize: 12)),
                     ),
                   ),
                 ),
               ],
             ),
           ),
-          Expanded(
-            flex: 2,
-            child: Container(
-              width: double.infinity,
-              color: Colors.grey.shade100,
-              padding: const EdgeInsets.all(12),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        _busy
-                            ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2))
-                            : const Icon(Icons.cloud_off, size: 16),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(_status,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                        'Detections: $_detections · scan QR → face → card (fingerprint optional)',
-                        style: Theme.of(context).textTheme.bodySmall),
-                    Text(_detail,
-                        style: Theme.of(context).textTheme.bodySmall),
-                  ],
-                ),
+          _StatusSheet(status: _status, detail: _detail, tone: _tone, busy: _busy, detections: _detections),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusSheet extends StatelessWidget {
+  const _StatusSheet({required this.status, required this.detail, required this.tone, required this.busy, required this.detections});
+
+  final String status;
+  final String detail;
+  final StatusTone tone;
+  final bool busy;
+  final int detections;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final (icon, color) = switch (tone) {
+      StatusTone.ok => (Icons.check_circle, scheme.primary),
+      StatusTone.fail => (Icons.error, scheme.error),
+      StatusTone.working => (Icons.sync, scheme.tertiary),
+      StatusTone.idle => (Icons.cloud_off_outlined, scheme.onSurfaceVariant),
+    };
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        border: Border(top: BorderSide(color: scheme.outlineVariant)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (busy && tone == StatusTone.working) SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: color)) else Icon(icon, size: 22, color: color),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(status, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
               ),
-            ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            detail,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Detections: $detections · ${S.stepScan} → ${S.stepFace} → ${S.stepCard}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant.withValues(alpha: 0.8), fontSize: 11),
           ),
         ],
       ),

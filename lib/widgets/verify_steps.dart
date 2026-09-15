@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../ui/app_strings.dart';
+
 /// Slim 3-step progress header: Scan → Face → Card.
 class VerifyStepsHeader extends StatelessWidget {
   const VerifyStepsHeader({super.key, required this.current});
@@ -7,10 +9,9 @@ class VerifyStepsHeader extends StatelessWidget {
   /// 1-based index of the current step.
   final int current;
 
-  static const _labels = ['Scan', 'Face', 'Card'];
-
   @override
   Widget build(BuildContext context) {
+    final labels = [S.stepScan, S.stepFace, S.stepCard];
     final scheme = Theme.of(context).colorScheme;
     return Row(
       children: [
@@ -27,7 +28,7 @@ class VerifyStepsHeader extends StatelessWidget {
             ),
           _StepDot(
             index: i + 1,
-            label: _labels[i],
+            label: labels[i],
             state: i + 1 < current
                 ? _StepState.done
                 : (i + 1 == current ? _StepState.now : _StepState.todo),
