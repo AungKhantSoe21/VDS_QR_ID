@@ -36,7 +36,7 @@ Face hashes come from `scripts/facematch.py --hash-of photo.jpg`
 ### 2. App
 
 ```bash
-cd /home/aks/Documents/qr_identity
+cd /home/aks/Documents/VDS_QR_ID
 flutter pub get
 flutter run -d <device>             # camera + biometrics need a real phone
 ```
