@@ -49,9 +49,6 @@ threshold, cache clear, about).
 then everything runs offline. Manage it in **Settings** (also: face
 threshold, cache clear, about).
 
-Legacy envelope QRs need `.env` → `ENCRYPTION_KEY=<64 hex>` (same value
-as the issuing server). No dart-define flags anywhere.
-
 ### 3. Field calibration
 
 `Settings → Face threshold` (default **0.60**, persisted). Raise it if
@@ -61,11 +58,10 @@ for online parity.
 
 ## How verification works (all on-device)
 
-1. **QR authenticity** — MOSIP: Base45 → CBOR → AES-GCM decrypt (CEK) →
-   inflate → EdDSA verify vs pinned issuer key → expiry
+1. **QR authenticity** — MOSIP v14+: Base45 → inflate → EdDSA verify
+   vs pinned issuer key → expiry
    (`lib/services/mosip.dart`, ported from backend `lib/mosip.js`,
    proven against backend-signed vectors in `test/mosip_test.dart`).
-   Legacy: envelope CBOR → AES-GCM → payload (`lib/services/eid_*`).
 2. **Face** — SCRFD-500M detect → ArcFace align → dual embed
    (EdgeFace-S + legacy w600k_mbf via `onnxruntime`, models
    download-on-first-use) → cosine vs compact template in both spaces,
